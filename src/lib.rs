@@ -35,6 +35,14 @@ pub struct JSValue {
     inner: JSValueRef,
 }
 
+impl Default for JSValue {
+    fn default() -> Self {
+        Self {
+            inner: std::ptr::null_mut(),
+        }
+    }
+}
+
 impl From<JSObject> for JSValue {
     fn from(js_object: JSObject) -> Self {
         // The two objects are very simple and will not be differents in any
@@ -144,10 +152,15 @@ impl JSValue {
     pub fn to_object(self, context: &JSContext) -> JSObject {
         unsafe { JSValueToObject(context.inner, self.inner, std::ptr::null_mut()).into() }
     }
+
+    /// Get Rust boolean value from JSValue.
+    pub fn to_boolean(&self, context: &JSContext) -> bool {
+        unsafe { JSValueToBoolean(context.inner, self.inner) }
+    }
 }
 
 /// A JavaScript object.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JSObject {
     inner: JSObjectRef,
 }
@@ -174,7 +187,7 @@ impl JSObject {
         value: JSValue,
     ) {
         let property_name = JSString::from_utf8(property_name.to_string()).unwrap();
-        let attributes = kJSPropertyAttributeDontDelete; // TODO
+        let attributes = 0; // TODO
         let mut exception: JSValueRef = std::ptr::null_mut();
         unsafe {
             JSObjectSetProperty(
@@ -188,8 +201,26 @@ impl JSObject {
         }
     }
 
-    pub fn get_property(&mut self, context: &JSContext, property_name: String) -> Option<JSValue> {
-        let property_name = JSString::from_utf8(property_name).unwrap();
+    /// Sets the property of an object.
+    pub fn delete_property(&mut self, context: &JSContext, property_name: impl ToString) {
+        let property_name = JSString::from_utf8(property_name.to_string()).unwrap();
+        let mut exception: JSValueRef = std::ptr::null_mut();
+        unsafe {
+            JSObjectDeleteProperty(
+                context.inner,
+                self.inner,
+                property_name.inner,
+                &mut exception,
+            );
+        }
+    }
+
+    pub fn get_property(
+        &self,
+        context: &JSContext,
+        property_name: impl ToString,
+    ) -> Option<JSValue> {
+        let property_name = JSString::from_utf8(property_name.to_string()).unwrap();
         let exception: JSValueRef = std::ptr::null_mut();
         let js_value = unsafe {
             JSObjectGetProperty(
@@ -207,7 +238,7 @@ impl JSObject {
     }
 
     pub fn class(
-        context: &JSContext,
+        context: &mut JSContext,
         class_name: impl ToString,
         constructor: JSObjectCallAsConstructorCallback,
     ) -> JSObject {
@@ -216,7 +247,7 @@ impl JSObject {
         class_definition.callAsConstructor = constructor;
         // TODO: we should manage the attributes and static parameters (even if it
         //       looks broken for the version 4.0)
-        // class_definition.attributes = 0;
+        // class_definition.attributes = kJSClassAttributeNoAutomaticPrototype;
         // class_definition.staticValues = values;
         // class_definition.staticFunctions = log;
 
@@ -224,20 +255,24 @@ impl JSObject {
         //       moment.
         unsafe {
             let class = JSClassCreate([class_definition].as_ptr() as _);
+            JSClassRetain(class);
+            context.classes.push(class);
             JSObjectMake(context.get_ref(), class, std::ptr::null_mut()).into()
         }
     }
 }
 
 /// A JavaScript virtual machine.
+#[derive(Clone)]
 pub struct JSVirtualMachine {
-    context_group: JSContextGroupRef,
+    pub context_group: JSContextGroupRef,
     global_context: JSGlobalContextRef,
 }
 
 impl Drop for JSVirtualMachine {
     fn drop(&mut self) {
         unsafe {
+            JSGarbageCollect(self.global_context);
             JSGlobalContextRelease(self.global_context);
             JSContextGroupRelease(self.context_group);
         }
@@ -276,8 +311,9 @@ impl JSVirtualMachine {
 /// A JavaScript execution context.
 pub struct JSContext {
     inner: JSContextRef,
-    vm: JSVirtualMachine,
+    pub vm: JSVirtualMachine,
     exception: Option<JSValue>,
+    classes: Vec<JSClassRef>,
 }
 
 impl Default for JSContext {
@@ -286,14 +322,32 @@ impl Default for JSContext {
     }
 }
 
-impl JSContext {
-    /// Create a `JSContext` object from `JSContextRef`.
-    pub fn from(ctx: JSContextRef) -> Self {
+impl From<JSContextRef> for JSContext {
+    fn from(ctx: JSContextRef) -> Self {
         let vm = JSVirtualMachine::from(ctx);
         Self {
             inner: ctx,
             vm,
             exception: None,
+            classes: vec![],
+        }
+    }
+}
+impl JSContext {
+    /// Create a new context in the same virtual machine
+    pub fn split(&self) -> Self {
+        unsafe {
+            let context = JSGlobalContextCreateInGroup(self.vm.context_group, std::ptr::null_mut());
+            JSContextGroupRetain(self.vm.context_group);
+            JSGlobalContextRetain(context);
+            let mut vm = self.vm.clone();
+            vm.global_context = context;
+            Self {
+                inner: context,
+                vm,
+                exception: self.exception.clone(),
+                classes: vec![],
+            }
         }
     }
 
@@ -313,6 +367,7 @@ impl JSContext {
             inner: vm.global_context,
             vm,
             exception: None,
+            classes: vec![],
         }
     }
 
@@ -322,6 +377,7 @@ impl JSContext {
             inner: vm.global_context,
             vm,
             exception: None,
+            classes: vec![],
         }
     }
 
