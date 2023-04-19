@@ -43,11 +43,13 @@ impl Default for JSValue {
     }
 }
 
-impl From<JSObject> for JSValue {
-    fn from(js_object: JSObject) -> Self {
+impl<T> From<&JSObject<T>> for JSValue {
+    fn from(js_object: &JSObject<T>) -> Self {
         // The two objects are very simple and will not be differents in any
         // cases.
-        unsafe { std::mem::transmute(js_object) }
+        Self {
+            inner: unsafe { std::mem::transmute(js_object.inner) },
+        }
     }
 }
 
@@ -149,7 +151,7 @@ impl JSValue {
     }
 
     /// Convert value into object
-    pub fn to_object(self, context: &JSContext) -> JSObject {
+    pub fn to_object<T>(self, context: &JSContext) -> JSObject<T> {
         unsafe { JSValueToObject(context.inner, self.inner, std::ptr::null_mut()).into() }
     }
 
@@ -161,24 +163,73 @@ impl JSValue {
 
 /// A JavaScript object.
 #[derive(Debug, Clone)]
-pub struct JSObject {
+pub struct JSObject<T> {
     inner: JSObjectRef,
+    /// The data is never read, but is used to keep track if the JSObject is
+    /// eventually constructed as a Class (or anything that should be released
+    /// on drop)
+    _data: Option<T>,
 }
 
-impl From<JSObjectRef> for JSObject {
+impl<T> From<JSObjectRef> for JSObject<T> {
     /// Wraps a `JSObject` from a `JSObjectRef`.
     fn from(inner: JSObjectRef) -> Self {
+        Self { inner, _data: None }
+    }
+}
+
+pub struct JSClass {
+    inner: JSClassRef,
+}
+
+impl JSClass {
+    pub fn create(name: impl ToString, constructor: JSObjectCallAsConstructorCallback) -> JSClass {
+        JSClass::create_ref(name, constructor).into()
+    }
+
+    fn create_ref(
+        name: impl ToString,
+        constructor: JSObjectCallAsConstructorCallback,
+    ) -> JSClassRef {
+        let mut class_definition = unsafe { kJSClassDefinitionEmpty };
+        class_definition.className = name.to_string().as_bytes().as_ptr() as _;
+        class_definition.callAsConstructor = constructor;
+        // TODO: we should manage the attributes and static parameters (even if it
+        //       looks broken for the version 4.0)
+        // class_definition.attributes = kJSClassAttributeNoAutomaticPrototype;
+        // class_definition.staticValues = values;
+        // class_definition.staticFunctions = log;
+
+        // TODO: manage private datas if any, we give std::ptr::null_mut() for the
+        //       moment.
+        unsafe {
+            let class = JSClassCreate([class_definition].as_ptr() as _);
+            JSClassRetain(class);
+            class
+        }
+    }
+}
+
+impl Drop for JSClass {
+    fn drop(&mut self) {
+        // Here we want to drop and release the class. But we might have transfered the ownership
+        // of the pointer to someone else. If any, we should have also swap the inner value with
+        // a null pointer because we dont want to signal to JSC to release anything.
+        if !self.inner.is_null() {
+            unsafe { JSClassRelease(self.inner) }
+        }
+    }
+}
+
+impl From<JSClassRef> for JSClass {
+    fn from(inner: JSClassRef) -> Self {
         Self { inner }
     }
 }
 
-impl Drop for JSObject {
-    fn drop(&mut self) {
-        // TODO
-    }
-}
+pub struct JSObjectDefault;
 
-impl JSObject {
+impl<T> JSObject<T> {
     /// Sets the property of an object.
     pub fn set_property(
         &mut self,
@@ -201,7 +252,7 @@ impl JSObject {
         }
     }
 
-    /// Sets the property of an object.
+    /// Deletes the property of an object.
     pub fn delete_property(&mut self, context: &JSContext, property_name: impl ToString) {
         let property_name = JSString::from_utf8(property_name.to_string()).unwrap();
         let mut exception: JSValueRef = std::ptr::null_mut();
@@ -241,23 +292,13 @@ impl JSObject {
         context: &mut JSContext,
         class_name: impl ToString,
         constructor: JSObjectCallAsConstructorCallback,
-    ) -> JSObject {
-        let mut class_definition = unsafe { kJSClassDefinitionEmpty };
-        class_definition.className = class_name.to_string().as_bytes().as_ptr() as _;
-        class_definition.callAsConstructor = constructor;
-        // TODO: we should manage the attributes and static parameters (even if it
-        //       looks broken for the version 4.0)
-        // class_definition.attributes = kJSClassAttributeNoAutomaticPrototype;
-        // class_definition.staticValues = values;
-        // class_definition.staticFunctions = log;
-
-        // TODO: manage private datas if any, we give std::ptr::null_mut() for the
-        //       moment.
+    ) -> JSObject<JSClass> {
+        let class = JSClass::create_ref(class_name, constructor);
         unsafe {
-            let class = JSClassCreate([class_definition].as_ptr() as _);
-            JSClassRetain(class);
-            context.classes.push(class);
-            JSObjectMake(context.get_ref(), class, std::ptr::null_mut()).into()
+            JSObject {
+                inner: JSObjectMake(context.get_ref(), class, std::ptr::null_mut()),
+                _data: Some(class.into()),
+            }
         }
     }
 }
@@ -312,8 +353,6 @@ impl JSVirtualMachine {
 pub struct JSContext {
     inner: JSContextRef,
     pub vm: JSVirtualMachine,
-    exception: Option<JSValue>,
-    classes: Vec<JSClassRef>,
 }
 
 impl Default for JSContext {
@@ -325,12 +364,7 @@ impl Default for JSContext {
 impl From<JSContextRef> for JSContext {
     fn from(ctx: JSContextRef) -> Self {
         let vm = JSVirtualMachine::from(ctx);
-        Self {
-            inner: ctx,
-            vm,
-            exception: None,
-            classes: vec![],
-        }
+        Self { inner: ctx, vm }
     }
 }
 impl JSContext {
@@ -342,12 +376,7 @@ impl JSContext {
             JSGlobalContextRetain(context);
             let mut vm = self.vm.clone();
             vm.global_context = context;
-            Self {
-                inner: context,
-                vm,
-                exception: self.exception.clone(),
-                classes: vec![],
-            }
+            Self { inner: context, vm }
         }
     }
 
@@ -366,8 +395,6 @@ impl JSContext {
         Self {
             inner: vm.global_context,
             vm,
-            exception: None,
-            classes: vec![],
         }
     }
 
@@ -376,19 +403,12 @@ impl JSContext {
         Self {
             inner: vm.global_context,
             vm,
-            exception: None,
-            classes: vec![],
         }
     }
 
     /// Returns the context global object.
-    pub fn get_global_object(&self) -> JSObject {
-        JSObject::from(unsafe { JSContextGetGlobalObject(self.inner) })
-    }
-
-    /// Return the exception thrown while evaluating a script.
-    pub fn get_exception(&self) -> Option<&JSValue> {
-        self.exception.as_ref()
+    pub fn get_global_object<T>(&self) -> JSObject<T> {
+        JSObject::<T>::from(unsafe { JSContextGetGlobalObject(self.inner) })
     }
 
     /// Evaluate the script.
@@ -396,8 +416,11 @@ impl JSContext {
     /// Returns the value the script evaluates to. If the script throws an
     /// exception, this function returns `None`. You can query the thrown
     /// exception with the `get_exception` method.
-    pub fn evaluate_script(&mut self, script: &str, starting_line_number: i32) -> Option<JSValue> {
-        self.exception = None;
+    pub fn evaluate_script(
+        &mut self,
+        script: &str,
+        starting_line_number: i32,
+    ) -> Result<JSValue, JSValue> {
         let script = JSString::from_utf8(script.to_string()).unwrap();
         let this_object = std::ptr::null_mut();
         let source_url = std::ptr::null_mut();
@@ -414,10 +437,9 @@ impl JSContext {
         };
         let value = JSValue::from(value);
         if value.is_null(self) {
-            self.exception = Some(JSValue::from(exception));
-            None
+            Err(JSValue::from(exception))
         } else {
-            Some(value)
+            Ok(value)
         }
     }
 }
