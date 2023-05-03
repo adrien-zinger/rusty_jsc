@@ -203,6 +203,19 @@ impl JSValue {
         Ok(obj)
     }
 
+    /// Tries to convert the value into an object with class attributes.
+    pub fn to_object_class(
+        &self,
+        context: &JSContext,
+        class: &JSClass,
+    ) -> Result<JSObject<JSObjectGenericClass>, JSValue> {
+        if self.is_object_of_class(context, class) {
+            unsafe { Ok(std::mem::transmute(self.to_object(context)?)) }
+        } else {
+            Err(JSValue::string(context, "Not a class convertible"))
+        }
+    }
+
     /// Convert value into a protected object (protected from garbage collection)
     pub fn into_protected_object(self, context: &JSContext) -> JSObject<JSProtected> {
         unsafe {
@@ -215,6 +228,10 @@ impl JSValue {
                 }),
             }
         }
+    }
+
+    pub fn is_object_of_class(&self, context: &JSContext, class: &JSClass) -> bool {
+        unsafe { JSValueIsObjectOfClass(context.inner, self.inner, class.inner) }
     }
 }
 
@@ -580,6 +597,26 @@ impl<T> JSObject<T> {
             );
         }
     }
+
+    pub fn is_object_of_class(&self, context: &JSContext, class: &JSClass) -> bool {
+        unsafe { JSValueIsObjectOfClass(context.inner, self.inner, class.inner) }
+    }
+}
+
+impl JSObject<JSObjectGeneric> {
+    /// Tries to convert the value into an object with JSObjectGenericClass
+    /// properties. Otherwise, return `self` in an error.
+    pub fn try_into_object_class(
+        self,
+        context: &JSContext,
+        class: &JSClass,
+    ) -> Result<JSObject<JSObjectGenericClass>, Self> {
+        if self.is_object_of_class(context, class) {
+            unsafe { Ok(std::mem::transmute(self)) }
+        } else {
+            Err(self)
+        }
+    }
 }
 
 impl From<JSValue> for JSValueRef {
@@ -636,6 +673,7 @@ pub struct JSClass {
 
 /// Specification of a `JSObject` as `JSObject<JSObjectGenericClass>` that is a
 /// variation of a `JSGenericObject` available to store private data.
+#[derive(Clone)]
 pub struct JSObjectGenericClass;
 
 impl JSClass {
