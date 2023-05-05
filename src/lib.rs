@@ -605,16 +605,30 @@ impl<T> JSObject<T> {
 
 impl JSObject<JSObjectGeneric> {
     /// Tries to convert the value into an object with JSObjectGenericClass
-    /// properties. Otherwise, return `self` in an error.
+    /// properties. Otherwise, an error.
     pub fn try_into_object_class(
         self,
         context: &JSContext,
         class: &JSClass,
-    ) -> Result<JSObject<JSObjectGenericClass>, Self> {
+    ) -> Result<JSObject<JSObjectGenericClass>, JSValue> {
         if self.is_object_of_class(context, class) {
             unsafe { Ok(std::mem::transmute(self)) }
         } else {
-            Err(self)
+            Err(JSValue::string(context, "Try to convert from wrong class"))
+        }
+    }
+
+    /// Tries to convert the value into an object with JSObjectGenericClass
+    /// properties. Otherwise, an error.
+    pub fn try_as_mut_object_class(
+        &mut self,
+        context: &JSContext,
+        class: &JSClass,
+    ) -> Result<&mut JSObject<JSObjectGenericClass>, JSValue> {
+        if self.is_object_of_class(context, class) {
+            unsafe { Ok(std::mem::transmute(self)) }
+        } else {
+            Err(JSValue::string(context, "Try to convert from wrong class"))
         }
     }
 }
@@ -994,3 +1008,5 @@ impl From<JSContextRef> for JSContext {
         Self { inner: ctx, vm }
     }
 }
+
+unsafe impl Send for JSContext {}
