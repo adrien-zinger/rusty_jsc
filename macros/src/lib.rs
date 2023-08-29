@@ -66,7 +66,6 @@ pub fn callback(_attr: TokenStream, item: TokenStream) -> TokenStream {
             rusty_jsc::private::JSValueMakeUndefined(__base_ctx)
         },
         _ => quote! {
-            //let res: Result<JSValue, JSValue> = todo!();
             let res: Result<JSValue, JSValue> = #target_func_name(
                 #context_var_name,
                 #function_var_name,
@@ -185,8 +184,8 @@ pub fn constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
             _exception: *mut JSValueRef,
         ) -> JSObjectRef {
             #(#inputs_adaptation)*
-            #function_call;
-            _constructor
+            let ret = #function_call;
+            ret.into()
         }
     };
     result.into()

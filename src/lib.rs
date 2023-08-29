@@ -270,7 +270,7 @@ impl<T> JSObject<T> {
         class_name: impl ToString,
         constructor: JSObjectCallAsConstructorCallback,
     ) -> JSObject<JSClass> {
-        let class = JSClass::create_ref(class_name, constructor);
+        let class = JSClass::create_ref(class_name, constructor, None);
         unsafe {
             JSObject {
                 inner: JSObjectMake(context.get_ref(), class, std::ptr::null_mut()),
@@ -631,6 +631,16 @@ impl JSObject<JSObjectGeneric> {
             Err(JSValue::string(context, "Try to convert from wrong class"))
         }
     }
+
+    /// Tries to convert the value into an object with JSObjectGenericClass
+    /// properties. Otherwise, an error.
+    ///
+    /// # Safety
+    ///
+    /// There is no guaranties to have instanciated a class.
+    pub unsafe fn as_mut_object_class_unchecked(&mut self) -> &mut JSObject<JSObjectGenericClass> {
+        std::mem::transmute(self)
+    }
 }
 
 impl From<JSValue> for JSValueRef {
@@ -691,17 +701,23 @@ pub struct JSClass {
 pub struct JSObjectGenericClass;
 
 impl JSClass {
-    pub fn create(name: impl ToString, constructor: JSObjectCallAsConstructorCallback) -> JSClass {
-        JSClass::create_ref(name, constructor).into()
+    pub fn create(
+        name: impl ToString,
+        constructor: JSObjectCallAsConstructorCallback,
+        finalize: JSObjectFinalizeCallback,
+    ) -> JSClass {
+        JSClass::create_ref(name, constructor, finalize).into()
     }
 
     fn create_ref(
         name: impl ToString,
         constructor: JSObjectCallAsConstructorCallback,
+        finalize: JSObjectFinalizeCallback,
     ) -> JSClassRef {
         let mut class_definition = unsafe { kJSClassDefinitionEmpty };
         class_definition.className = name.to_string().as_bytes().as_ptr() as _;
         class_definition.callAsConstructor = constructor;
+        class_definition.finalize = finalize;
         // TODO: we should manage the attributes and static parameters (even if it
         //       looks broken for the version 4.0)
         // class_definition.attributes = kJSClassAttributeNoAutomaticPrototype;
@@ -723,7 +739,7 @@ impl JSClass {
     pub fn make_object(&self, context: &JSContext) -> JSObject<JSObjectGenericClass> {
         unsafe {
             JSObject {
-                inner: JSObjectMake(context.get_ref(), self.inner, std::ptr::null_mut()),
+                inner: JSObjectMake(context.inner, self.inner, std::ptr::null_mut()),
                 data: None,
             }
         }
